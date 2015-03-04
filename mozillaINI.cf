@@ -1,0 +1,12 @@
+
+token MozText (( '\\' char | (char - ["?()[]=0123456789;\n\" \\"] ) ) 
+               ( '\\' char | (char - ["()[]=;\n \"\\"]))* ) ;
+
+INIDoc. Document ::= [Grp] ;
+INIGrp. Grp ::= "[" MozText "]" [KeyPair] ;
+INIKV. KeyPair ::= MozText "=" Value ;
+terminator Grp "" ;
+terminator KeyPair "" ;
+
+INIVText. Value ::= MozText ;
+INIVInteger. Value ::= Integer ;
