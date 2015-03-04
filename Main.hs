@@ -13,19 +13,24 @@ import Text.PrintMozillaINI
 import Data.Traversable (traverse)
 import Control.Monad 
 import Debug.Trace
-import System.FilePath ((</>))
+import System.FilePath ((</>),isPathSeparator,splitFileName)
 import Data.Monoid
-import System.FilePath
 import System.Process (readProcess)
 
-dirFind f (x:xs) = dirFind1 f x ++ dirFind f xs
-dirFind f [] = []
+dirFind :: (FilePath -> Bool) -> [FilePath] -> IO [FilePath]
+dirFind f (x:xs) = do 
+  a <- dirFind1 f x 
+  b <- dirFind f xs
+  return $ a ++ b 
+
+dirFind f [] = return []
 
 dirFind1 :: (FilePath -> Bool) -> FilePath -> IO [FilePath]
 dirFind1 match path = do
    matches0 <- fmap (map (path </>))$ getDirCts path
-   matches1 <- mapM (dirFind match) (map (path </>) matches0)
-   return $ filter match (map (path </>) $ matches0 ++ concat matches1)
+   let mat = filter match matches0
+   matches1 <-  dirFind match matches0
+   return $ filter match (map (path </>) $ matches0 ++ matches1)
 
 
 getDirCts path = doesDirectoryExist path >>= bool (return []) 
@@ -44,8 +49,8 @@ getPaths (Ok (INIDoc grps)) = concatMap getPathGrp grps
         getPathGrp (INIGrp _ kvs) = filter (not . null . snd) $
                                     map ((,) r . getPathKV) kvs
             where 
-               r = case (headm $ dropWhile notIsRelative kvs) of
-                     [(INIKV (MozText "IsRelative") (INIVInteger r0))] -> r0
+               r = case headm $ dropWhile notIsRelative kvs of
+                     [INIKV (MozText "IsRelative") (INIVInteger r0)] -> r0
                      _ -> -1
                notIsRelative (INIKV (MozText "IsRelative") _ ) = False
                notIsRelative _ = True
@@ -53,37 +58,45 @@ getPaths (Ok (INIDoc grps)) = concatMap getPathGrp grps
         getPathKV _ = []
 getPaths _ = []
 
-headm (x:xs) = return x
-headm _ = mempty
+headm (x:xs) = [x]
+headm _ = []
+tailm (x:xs) = xs
+tailm _ = []
 
-parseConfig file = do
-   tree <- parseINI file
-   todo
-   where todo = todo
+parseConfig :: FilePath -> IO (Err Document)
+parseConfig file = doesFileExist file >>= bool (return $ return (INIDoc []))
+                                               (return $ parseINI file)
 
 getMD5Command = do
   appDir <- getAppUserDataDirectory "mozilla-extract-extensions"
-  configDict <- bool (appDir </> "config") (return []) (parseConfig (appDir </> "config"))
-
+  configDict <- do { tree <- parseConfig (appDir </> "config"); case tree of {
+      Ok x -> return x;
+      Bad s -> putStrLn s >> return (INIDoc []) }}
+  putStrLn "OK. 1 2 3"
+  print (take 4 $ wordsBy (==':') "test1:test2:a:b:Catmayyou:d")
   searchPaths <- fmap (wordsBy isPathSeparator) $ getEnv "PATH"
-  md5shellCommand <- dirFind (=="md5sum" . reverse . dropWhile isPathSeparator . reverse) searchPath
-  case mhead md5shellCommand of 
-     mempty        -> do
+  putStrLn ("searchPaths: " ++ show (take 4 searchPaths))
+  md5shellCommand <- dirFind ((=="md5sum") . reverse . dropWhile isPathSeparator . reverse) searchPaths
+  case headm md5shellCommand of 
+     []        -> do
           hPutStrLn stderr 
                    "Warning: Could not find md5sum program in your path.  \n\
                    \         (Consequently, newer extensions will not be  \n\
                    \          updated if they change)"
           return (\_ -> return "0")
-     shellcommand ->
-          putStrLn ("USING md5sum program: " ++ shellcommand)
+     [shellcommand] -> do
+          putStrLn ( "USING md5sum program: " ++ shellcommand )
           return (\xs -> readProcess shellcommand xs "")
   where
-    wordsBy f xs = let (x,y) = span (not . f) xs in x: wordsBy c y
     wordsBy f [] = []
+    wordsBy f xs = let (x,y) = break f xs in x: wordsBy f (tailm y)
 
 main :: IO ()
 main = do
+  putStrLn "Begin..."
   md5sum <- getMD5Command
+  testsum <- md5sum ["test"]
+  print testsum
   homeD <- getHomeDirectory
   mozillaD <- getAppUserDataDirectory "mozilla"  
   cacheD <- getAppUserDataDirectory "cache"
@@ -96,9 +109,9 @@ main = do
   if null pf_searchResults then do
      putStrLn $ "Error:  File not found: profiles.ini (searched " ++ mozillaD ++ ")"
      exitFailure
-  else do
+  else 
      putStrLn $ "Mozilla profiles.ini file: " ++ profilesini
-  paths <- fmap (concat . map (prependPathifRelative profilesini) . getPaths) (readFile profilesini >>= return . parseINI)
+  paths <- fmap (concatMap (prependPathifRelative profilesini) . getPaths) (liftM parseINI (readFile profilesini))
   print paths
   xpis <- dirFind (".xpi" `isSuffixOf`) paths
   mapM_ print xpis
