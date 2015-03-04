@@ -13,7 +13,7 @@ import Text.PrintMozillaINI
 import Data.Traversable (traverse)
 import Control.Monad 
 import Debug.Trace
-import System.FilePath ((</>),isPathSeparator,splitFileName)
+import System.FilePath ((</>),isPathSeparator, isSearchPathSeparator,splitFileName)
 import Data.Monoid
 import System.Process (readProcess)
 
@@ -34,7 +34,7 @@ dirFind1 match path = do
 
 
 getDirCts path = doesDirectoryExist path >>= bool (return []) 
-              ( fmap (filter (`notElem` [".",".."])) 
+              ( fmap (filter (`notElem` [".","..","lost+found"])) 
               $ System.Directory.getDirectoryContents path
               )
 
@@ -73,10 +73,9 @@ getMD5Command = do
       Ok x -> return x;
       Bad s -> putStrLn s >> return (INIDoc []) }}
   putStrLn "OK. 1 2 3"
-  print (take 4 $ wordsBy (==':') "test1:test2:a:b:Catmayyou:d")
-  searchPaths <- fmap (wordsBy isPathSeparator) $ getEnv "PATH"
-  putStrLn ("searchPaths: " ++ show (take 4 searchPaths))
-  md5shellCommand <- dirFind ((=="md5sum") . reverse . dropWhile isPathSeparator . reverse) searchPaths
+  searchPaths <- fmap (wordsBy isSearchPathSeparator) $ getEnv "PATH"
+  putStrLn ("searchPaths: " ++ show (take 100 searchPaths))
+  md5shellCommand <- dirFind ((=="md5sum") . reverse . takeWhile (not . isPathSeparator) . reverse) searchPaths
   case headm md5shellCommand of 
      []        -> do
           hPutStrLn stderr 
