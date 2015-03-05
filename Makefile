@@ -19,6 +19,8 @@ parser: bnfstuff
 
 clean:
 	-rm -f Text/*.log Text/*.aux Text/*.hi Text/*.o Text/*.dvi
+	-rm -f Main.o
+	-rm -f Main.hi
 
 distclean: clean
 	-rm -f Text/DocMozillaINI.* Text/LexMozillaINI.* Text/ParMozillaINI.* Text/LayoutMozillaINI.* Text/SkelMozillaINI.* Text/PrintMozillaINI.* Text/TestMozillaINI.* Text/AbsMozillaINI.* Text/TestMozillaINI Text/ErrM.* Text/SharedString.* Text/ComposOp.* Text/mozillaINI.dtd Text/XMLMozillaINI.* 
