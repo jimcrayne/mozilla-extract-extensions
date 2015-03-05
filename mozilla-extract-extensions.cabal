@@ -15,6 +15,11 @@ category:            Development
 build-type:          Simple
 -- extra-source-files:  
 cabal-version:       >=1.10
+bug-reports: https://github.com/jimcrayne/mozilla-extract-extensions/issues
+
+source-repository head
+  type: git
+  location: https://github.com/jimcrayne/mozilla-extract-extensions
 
 executable mozilla-extract-extensions
   main-is:             Main.hs
