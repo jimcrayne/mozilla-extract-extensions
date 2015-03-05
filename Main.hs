@@ -18,11 +18,15 @@ import Control.Monad
 import qualified System.Info (os)
 import Debug.Trace
 import System.FilePath ((</>),isPathSeparator, isSearchPathSeparator,splitFileName,dropFileName)
+import qualified Filesystem.Path as F (basename)
+import qualified Filesystem.Path.CurrentOS as OS (decodeString,encodeString)
 import Data.Monoid
-import System.Process (readProcess)
+import System.Process (readProcess,callProcess)
 import Text.Printf (printf)
 import Control.Monad.Loops (iterateWhile)
 import Debug.Trace
+import Data.IORef
+import qualified Data.Map.Strict as M
 
 import Text.ParserCombinators.ReadP as P
 import Text.Read
@@ -107,13 +111,22 @@ getKeyValue grp key (INIDoc (dropWhile (\(INIGrp (MozText g) _) -> g /= grp) -> 
 defaultCheckSumExeName :: String
 defaultCheckSumExeName = if "mingw" `isPrefixOf` System.Info.os then "fciv" else "md5sum"
 
+defaultUnzipName :: String
+defaultUnzipName = if "mingw" `isPrefixOf` System.Info.os then "unzip.exe" else "unzip"
+
 getDefaultConfigDocument :: IO Document
 getDefaultConfigDocument = do
   checksumExePath <- liftM (fromMaybe "") (findExecutable defaultCheckSumExeName)
+  unzipExePath <- liftM (fromMaybe "") (findExecutable defaultUnzipName)
   let defaultCheckSumOptions = if "mingw" `isPrefixOf` System.Info.os then "/md5" else "--"
       defaultConfigDoc = INIDoc [INIGrp (MozText "Checksum") 
                                         [ INIKV (MozText "executable") (INIVText (MozText checksumExePath))
-                                        , INIKV (MozText "options") (INIVText (MozText defaultCheckSumOptions)) ]]
+                                        , INIKV (MozText "options") (INIVText (MozText defaultCheckSumOptions)) ]
+                                ,INIGrp (MozText "Checksum") 
+                                        [ INIKV (MozText "executable") (INIVText (MozText unzipExePath))
+                                        , INIKV (MozText "options") (INIVText (MozText "-d")) ]
+                                ]
+
   return defaultConfigDoc
 
 
@@ -139,8 +152,12 @@ promptSelectLL instruction prompt options lastMeansCustom = do
         Left _ -> return (-1)
         Right x -> return x
    
+ifM :: Monad m => m Bool -> m a -> m a -> m a
+ifM p t e = do b <- p
+               if b then t else e
   
-getMD5Command = do
+getConfigDict :: IO Document
+getConfigDict = do
   defaultConfigDoc <- getDefaultConfigDocument
 
   appDir <- getAppUserDataDirectory "mozilla-extract-extensions"
@@ -152,9 +169,10 @@ getMD5Command = do
   possiblyExistingConfigs <- sequence [doesFileExist (appDir </> "config"), doesFileExist (appconfigDir </> "config")]
   let existsConfig = or possiblyExistingConfigs
       configPath = case possiblyExistingConfigs of
-                    [True,False] -> appDir </> "config"
                     [False,True] -> appconfigDir </> "config"
+                    _ -> appDir </> "config"
 
+  createdConfig <- newIORef False
   if not existsConfig then do
     putStrLn ("Could not find file: " ++ (appDir </> "config") ++ " nor file: " ++ (appconfigDir </> "config"))
     putStrLn "It will speed up future runs, if we create this file now."
@@ -174,20 +192,24 @@ getMD5Command = do
                                                 , appshareDir </> "src"
                                                 , "Specify full path for custom location for sources"]
                                                 True ;
-                           createConfigFile path (insertKV "Output" "folder" outputFolder (insertKV "Checksum" "cache" checksumCachePath defaultConfigDoc)) }
+                           createConfigFile path (insertKV "Output" "folder" outputFolder (insertKV "Checksum" "cache" checksumCachePath defaultConfigDoc));
+                           writeIORef createdConfig True }
     case answer of
       '\n':_ -> yesCreateIt
       'Y':_ -> yesCreateIt
       'y':_ -> yesCreateIt
       _ -> putStrLn "Warning: Not creating config file per user request..."
   else putStrLn $ "Config file found, reading " ++ configPath ++ " ..."
-  configDict <- bool (return defaultConfigDoc) 
+  configDict <- ifM  (readIORef createdConfig)
                      (do { tree <- liftM parseINI (readFile configPath); 
                            case tree of { Ok x -> return x; Bad s -> putStrLn s >> return defaultConfigDoc }})
-                     existsConfig
+                     (return defaultConfigDoc) 
+  return configDict
+
+getMD5Command configDict =
   let checksumExe= fromMaybe "" (getKeyValue "Checksum" "executable" configDict)
       checksumOpt= fromMaybe "--" (getKeyValue "Checksum" "options" configDict)
-  case  checksumExe of 
+   in case  checksumExe of 
      ""        -> do
           hPutStrLn stderr 
                    (printf "Warning: Could not find %s program in your path.  \n\
@@ -198,17 +220,40 @@ getMD5Command = do
           putStrLn ( "USING md5sum program: " ++ shellcommand )
           return (\xs -> readProcess shellcommand (checksumOpt:xs) "")
 
+getUnzipCommand configDict =
+  let unzipExe= fromMaybe defaultUnzipName (getKeyValue "Output" "executable" configDict)
+      unzipOpt= fromMaybe "-d" (getKeyValue "Output" "options" configDict)
+   in case  unzipExe of 
+     ""        -> do
+          hPutStrLn stderr 
+                   (printf "Warning: Could not find %s program in your path.  \n\
+                   \         (Extensions will not be extracted until it is installed)" defaultUnzipName)
+          return (\_ -> return ())
+     shellcommand -> do
+          putStrLn ( "USING md5sum program: " ++ shellcommand )
+          return (\xs -> callProcess shellcommand (unzipOpt:xs) )
+
 createConfigFile file document = do
   putStrLn $ "Creating file: " ++ file
   createDirectoryIfMissing True {- parents -} (dropFileName file)
   writeFile file . unlines .  drop 1 . lines $ printTree document
   appendFile file "\n"
 
+
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
-  putStrLn "Begin..."
-  md5sum <- getMD5Command
+  appDir <- getAppUserDataDirectory "mozilla-extract-extensions"
+  configDict <- getConfigDict
+  md5sum <- getMD5Command configDict
+  unzip <- getUnzipCommand configDict
+  let outFolder    = fromMaybe (appDir </> "src") (getKeyValue "Output" "folder" configDict)
+      md5cacheFile = fromMaybe (appDir </> "checksum.cache") (getKeyValue "Checksum" "cache" configDict)
+  md5cache <- fmap M.fromList $ ifM (doesFileExist md5cacheFile)
+                  (join . fmap (readIO::String -> IO [(String,String)]) $ readFile md5cacheFile)
+                  (return [])
+  putStrLn "current md5sums:"
+  mapM_ (putStr . fst) (M.toList md5cache)
   testsum <- md5sum ["test"]
   print testsum
   homeD <- getHomeDirectory
@@ -232,10 +277,23 @@ main = do
   xpis <-  dirFind (".xpi" `isSuffixOf`) paths
   mapM_ print xpis
   checksums <- mapM (\s -> do {sum <- md5sum [s]; return (sum, s)})  xpis
-  print checksums
+  forM checksums $ \pair@(sum,file) -> 
+     case M.lookup sum md5cache of
+        Just file0 | file == file0 -> ifM (doesDirectoryExist (outFolder </> (OS.encodeString (F.basename (OS.decodeString file)))))
+                                          (putStrLn ("* Skipping File:" ++ file ++"\n   (Checksum matched, and folder exists so assuming already expanded)") )
+                                          (expandXPIFile unzip outFolder file)
+        _  -> (expandXPIFile unzip outFolder file)
+  createDirectoryIfMissing True {- parents -} (dropFileName md5cacheFile)
+  writeFile md5cacheFile (show checksums)
   where
     echo = putStrLn
     prependPathifRelative file0 (x, fs) | x>0 = let (d,_) = splitFileName file0 in map (d </>) fs
     prependPathifRelative _ (_,fs)  = fs
+    
+    expandXPIFile unzip folder file = do
+      putStrLn ("* Expanding File:" ++ file ++ " ...")
+      let targetDir = (folder </> (OS.encodeString (F.basename (OS.decodeString file))))
+      createDirectoryIfMissing True {- parents -} targetDir
+      unzip [targetDir,file]
 
     
