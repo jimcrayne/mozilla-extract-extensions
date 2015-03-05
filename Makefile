@@ -1,5 +1,8 @@
 all: patches
 
+mozilla-extract-extensions: 
+	cabal build
+
 bnfstuff: need-bnfc distclean
 	bnfc --haskell -p Text mozillaINI.cf
 
