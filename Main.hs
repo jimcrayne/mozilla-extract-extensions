@@ -254,7 +254,6 @@ main = do
                   (return [])
   putStrLn "current md5sums:"
   mapM_ (putStr . fst) (M.toList md5cache)
-  testsum <- md5sum ["test"]
   print testsum
   homeD <- getHomeDirectory
   mozillaD <- getAppUserDataDirectory "mozilla"  
