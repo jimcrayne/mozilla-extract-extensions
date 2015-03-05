@@ -30,6 +30,6 @@ executable mozilla-extract-extensions
                        array,
                        filepath,
                        process,
-                       HsOpenSSL
+                       monad-loops
   -- hs-source-dirs:      
   default-language:    Haskell2010
