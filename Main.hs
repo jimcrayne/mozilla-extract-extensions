@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns #-}
+
 import Data.List
 import System.Environment
 import System.Exit
@@ -10,12 +12,33 @@ import Text.ParMozillaINI
 import Text.AbsMozillaINI
 import Text.ErrM
 import Text.PrintMozillaINI
+import Data.Maybe (fromMaybe)
 import Data.Traversable (traverse)
 import Control.Monad 
+import qualified System.Info (os)
 import Debug.Trace
-import System.FilePath ((</>),isPathSeparator, isSearchPathSeparator,splitFileName)
+import System.FilePath ((</>),isPathSeparator, isSearchPathSeparator,splitFileName,dropFileName)
 import Data.Monoid
 import System.Process (readProcess)
+import Text.Printf (printf)
+import Control.Monad.Loops (iterateWhile)
+import Debug.Trace
+
+import Text.ParserCombinators.ReadP as P
+import Text.Read
+
+-- Note: this is already defined in base 4.6.0.0
+readEither :: Read a => String -> Either String a
+readEither s =
+  case [ x | (x,"") <- readPrec_to_S read' minPrec s ] of
+    [x] -> Right x
+    []  -> Left "Prelude.read: no parse"
+    _   -> Left "Prelude.read: ambiguous parse"
+ where
+  read' =
+    do x <- readPrec
+       lift P.skipSpaces
+       return x
 
 dirFind :: (FilePath -> Bool) -> [FilePath] -> IO [FilePath]
 dirFind f (x:xs) = do 
@@ -41,6 +64,7 @@ getDirCts path = doesDirectoryExist path >>= bool (return [])
 -- Same as Data.Bool
 bool no yes b = if b then yes else no
 
+parseINI :: String -> Err Document
 parseINI = pDocument . myLexer
 
 getPaths :: Err Document -> [(Integer,[FilePath])]
@@ -63,35 +87,126 @@ headm _ = []
 tailm (x:xs) = xs
 tailm _ = []
 
-parseConfig :: FilePath -> IO (Err Document)
-parseConfig file = doesFileExist file >>= bool (return $ return (INIDoc []))
-                                               (return $ parseINI file)
 
+--insertKV :: GroupName -> KeyName -> Value-> Document -> Document
+insertKV :: String -> String -> String -> Document -> Document
+insertKV grp key val (INIDoc groups) = let (beforeg,atg) = break (\(INIGrp (MozText g) _) -> trace ("g=" ++ show g ++ "\n" ++ "grp=" ++ show grp) g == grp) groups in
+  case trace ("beforeg=" ++ show beforeg ++  "\natg= " ++ show atg) atg of
+    [] -> INIDoc (groups ++ [INIGrp (MozText grp) [INIKV (MozText key) (INIVText (MozText val))]])
+    (INIGrp _ kvs :xs) -> INIDoc $ beforeg ++ (INIGrp (MozText grp) (kvs ++ [INIKV (MozText key) (INIVText (MozText val))])):xs
+
+getKeyValue :: String -> String -> Document -> Maybe String
+getKeyValue grp key (INIDoc (dropWhile (\(INIGrp (MozText g) _) -> g /= grp) -> dict)) = case dict of
+  [] -> Nothing
+  (INIGrp _ (dropWhile (\(INIKV (MozText k) _) -> k /= key) -> kvs):_) -> case kvs of
+     (INIKV _ (INIVText (MozText value)):_) -> return value
+     --(INIKV _ (INIVInteger value):_) -> return value
+     _ -> Nothing
+     
+
+defaultCheckSumExeName :: String
+defaultCheckSumExeName = if "mingw" `isPrefixOf` System.Info.os then "fciv" else "md5sum"
+
+getDefaultConfigDocument :: IO Document
+getDefaultConfigDocument = do
+  checksumExePath <- liftM (fromMaybe "") (findExecutable defaultCheckSumExeName)
+  let defaultCheckSumOptions = if "mingw" `isPrefixOf` System.Info.os then "/md5" else "--"
+      defaultConfigDoc = INIDoc [INIGrp (MozText "Checksum") 
+                                        [ INIKV (MozText "executable") (INIVText (MozText checksumExePath))
+                                        , INIKV (MozText "options") (INIVText (MozText defaultCheckSumOptions)) ]]
+  return defaultConfigDoc
+
+
+promptSelect instruction prompt options = promptSelectLL instruction prompt options False
+promptSelectLL instruction prompt options lastMeansCustom = do
+  putStrLn instruction
+  selection <- iterateWhile (\x -> x <=0 || x > length options) $ do
+      mapM_ putStrLn (zipWith (\x y -> show x ++ ") " ++ y) [1..] options)
+      putStr prompt
+      hFlush stdout
+      line <- getLine 
+      readAnswer line
+  if lastMeansCustom && selection == length options then do
+    putStrLn (last options ++ ": ")
+    line <- getLine
+    return line
+  else 
+    return (options !! (selection - 1))
+  where 
+    readAnswer :: String -> IO Int
+    readAnswer s = 
+      case readEither s :: Either String Int of
+        Left _ -> return (-1)
+        Right x -> return x
+   
+  
 getMD5Command = do
+  defaultConfigDoc <- getDefaultConfigDocument
+
   appDir <- getAppUserDataDirectory "mozilla-extract-extensions"
-  configDict <- do { tree <- parseConfig (appDir </> "config"); case tree of {
-      Ok x -> return x;
-      Bad s -> putStrLn s >> return (INIDoc []) }}
-  putStrLn "OK. 1 2 3"
-  searchPaths <- fmap (wordsBy isSearchPathSeparator) $ getEnv "PATH"
-  putStrLn ("searchPaths: " ++ show (take 100 searchPaths))
-  md5shellCommand <- dirFind ((=="md5sum") . reverse . takeWhile (not . isPathSeparator) . reverse) searchPaths
-  case headm md5shellCommand of 
-     []        -> do
+  appconfigDir <- fmap (</> "mozilla-extract-extensions") $ getAppUserDataDirectory "config"
+  appcacheDir <- fmap (</> "mozilla-extract-extensions") $ getAppUserDataDirectory "cache"
+  appshareDir <- fmap ((</> "mozilla-extract-extensions"). (</> "share")) $ getAppUserDataDirectory "local"
+
+  -- Is this the first run? - May have to create config file
+  possiblyExistingConfigs <- sequence [doesFileExist (appDir </> "config"), doesFileExist (appconfigDir </> "config")]
+  let existsConfig = or possiblyExistingConfigs
+      configPath = case possiblyExistingConfigs of
+                    [True,False] -> appDir </> "config"
+                    [False,True] -> appconfigDir </> "config"
+
+  if not existsConfig then do
+    putStrLn ("Could not find file: " ++ (appDir </> "config") ++ " nor file: " ++ (appconfigDir </> "config"))
+    putStrLn "It will speed up future runs, if we create this file now."
+    putStr "Would you like me to create it now? [Y/n] "
+    hFlush stdout
+    answer <- getLine
+    let yesCreateIt = do { path <- promptSelect "\nThe following locations for the config file are supported, please choose one:\n" 
+                                                "Enter selection [1/2] ? " 
+                                                [appDir </> "config", appconfigDir </> "config"]  ;
+                           checksumCachePath <- promptSelect "\nPlese select location for checksum cache file:\n"
+                                                "Enter selection [1/2] ? " 
+                                                [appDir </> "checksum.cache", appcacheDir </> "checksum.cache"]  ;
+                           outputFolder <- promptSelectLL "\nWhere to expand sources to?\n"
+                                                "Enter selction [1/2/3/4] ? "
+                                                [ appDir </> "src"
+                                                , appcacheDir </> "src"
+                                                , appshareDir </> "src"
+                                                , "Specify full path for custom location for sources"]
+                                                True ;
+                           createConfigFile path (insertKV "Output" "folder" outputFolder (insertKV "Checksum" "cache" checksumCachePath defaultConfigDoc)) }
+    case answer of
+      '\n':_ -> yesCreateIt
+      'Y':_ -> yesCreateIt
+      'y':_ -> yesCreateIt
+      _ -> putStrLn "Warning: Not creating config file per user request..."
+  else putStrLn $ "Config file found, reading " ++ configPath ++ " ..."
+  configDict <- bool (return defaultConfigDoc) 
+                     (do { tree <- liftM parseINI (readFile configPath); 
+                           case tree of { Ok x -> return x; Bad s -> putStrLn s >> return defaultConfigDoc }})
+                     existsConfig
+  let checksumExe= fromMaybe "" (getKeyValue "Checksum" "executable" configDict)
+      checksumOpt= fromMaybe "--" (getKeyValue "Checksum" "options" configDict)
+  case  checksumExe of 
+     ""        -> do
           hPutStrLn stderr 
-                   "Warning: Could not find md5sum program in your path.  \n\
+                   (printf "Warning: Could not find %s program in your path.  \n\
                    \         (Consequently, newer extensions will not be  \n\
-                   \          updated if they change)"
+                   \          updated if they change)" defaultCheckSumExeName)
           return (\_ -> return "0")
-     [shellcommand] -> do
+     shellcommand -> do
           putStrLn ( "USING md5sum program: " ++ shellcommand )
-          return (\xs -> readProcess shellcommand xs "")
-  where
-    wordsBy f [] = []
-    wordsBy f xs = let (x,y) = break f xs in x: wordsBy f (tailm y)
+          return (\xs -> readProcess shellcommand (checksumOpt:xs) "")
+
+createConfigFile file document = do
+  putStrLn $ "Creating file: " ++ file
+  createDirectoryIfMissing True {- parents -} (dropFileName file)
+  writeFile file . unlines .  drop 1 . lines $ printTree document
+  appendFile file "\n"
 
 main :: IO ()
 main = do
+  hSetBuffering stdout LineBuffering
   putStrLn "Begin..."
   md5sum <- getMD5Command
   testsum <- md5sum ["test"]
@@ -105,6 +220,8 @@ main = do
   mozDcnts <- getDirCts mozillaD
   pf_searchResults <- dirFind1 ("profiles.ini" `isSuffixOf`) mozillaD 
   let profilesini = head pf_searchResults
+  profilesIniTree <- fmap ((\x -> case x of {Bad _ -> INIDoc []; Ok y -> y}) . parseINI) (readFile profilesini)
+  putStrLn ("DEBUG ini:" ++ printTree profilesIniTree)
   if null pf_searchResults then do
      putStrLn $ "Error:  File not found: profiles.ini (searched " ++ mozillaD ++ ")"
      exitFailure
@@ -112,8 +229,10 @@ main = do
      putStrLn $ "Mozilla profiles.ini file: " ++ profilesini
   paths <- fmap (concatMap (prependPathifRelative profilesini) . getPaths) (liftM parseINI (readFile profilesini))
   print paths
-  xpis <- dirFind (".xpi" `isSuffixOf`) paths
+  xpis <-  dirFind (".xpi" `isSuffixOf`) paths
   mapM_ print xpis
+  checksums <- mapM (\s -> do {sum <- md5sum [s]; return (sum, s)})  xpis
+  print checksums
   where
     echo = putStrLn
     prependPathifRelative file0 (x, fs) | x>0 = let (d,_) = splitFileName file0 in map (d </>) fs
