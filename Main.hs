@@ -230,7 +230,7 @@ getUnzipCommand configDict =
                    \         (Extensions will not be extracted until it is installed)" defaultUnzipName)
           return (\_ -> return ())
      shellcommand -> do
-          putStrLn ( "USING md5sum program: " ++ shellcommand )
+          putStrLn ( "USING Unzip program: " ++ shellcommand )
           return (\xs -> callProcess shellcommand (unzipOpt:xs) )
 
 createConfigFile file document = do
