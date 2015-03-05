@@ -101,7 +101,7 @@ insertKV grp key val (INIDoc groups) = let (beforeg,atg) = break (\(INIGrp (MozT
 
 getKeyValue :: String -> String -> Document -> Maybe String
 getKeyValue grp key (INIDoc (dropWhile (\(INIGrp (MozText g) _) -> g /= grp) -> dict)) = case dict of
-  [] -> Nothing
+  [] -> trace ("KV("++show grp++","++show key++") NOTFOUND") Nothing
   (INIGrp _ (dropWhile (\(INIKV (MozText k) _) -> k /= key) -> kvs):_) -> case kvs of
      (INIKV _ (INIVText (MozText value)):_) -> return value
      --(INIKV _ (INIVInteger value):_) -> return value
@@ -200,10 +200,10 @@ getConfigDict = do
       'y':_ -> yesCreateIt
       _ -> putStrLn "Warning: Not creating config file per user request..."
   else putStrLn $ "Config file found, reading " ++ configPath ++ " ..."
-  configDict <- ifM  (readIORef createdConfig)
+  configDict <- ifM  (fmap (existsConfig ||) $ readIORef createdConfig)
                      (do { tree <- liftM parseINI (readFile configPath); 
-                           case tree of { Ok x -> return x; Bad s -> putStrLn s >> return defaultConfigDoc }})
-                     (return defaultConfigDoc) 
+                           case tree of { Ok x -> putStrLn (printTree x) >> return x; Bad s -> putStrLn ("ERROR: "++ s) >> return defaultConfigDoc }})
+                     (putStrLn "WARNING: Using defaultConfig! **" >> return defaultConfigDoc) 
   return configDict
 
 getMD5Command configDict =
@@ -278,7 +278,8 @@ main = do
   forM checksums $ \pair@(sum,file) -> 
      case M.lookup sum md5cache of
         Just file0 | file == file0 -> ifM (doesDirectoryExist (outFolder </> (OS.encodeString (F.basename (OS.decodeString file)))))
-                                          (putStrLn ("* Skipping File:" ++ file ++"\n   (Checksum matched, and folder exists so assuming already expanded)") )
+                                          (putStrLn ("* Skipping File:" ++ file ++"\n   (Checksum matched, and folder exists so assuming already expanded)") 
+                                           >> putStrLn ("FOLDER FOUND: " ++ (outFolder </> (OS.encodeString (F.basename (OS.decodeString file))))))
                                           (expandXPIFile unzip outFolder file)
         _  -> (expandXPIFile unzip outFolder file)
   createDirectoryIfMissing True {- parents -} (dropFileName md5cacheFile)
